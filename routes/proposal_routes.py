@@ -2,16 +2,14 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from backend.llm_utils import expand_rfp, refine_proposal, conversation_memory
+from backend.llm_utils import expand_rfp, refine_proposal, conversation_memory, remove_unsupported_unicode
 from backend.pinecone_utils import retrieve_similar_docs
-from backend.agentic_pipeline import proposal_agentic_chain
-from backend.agent_status_tracker import get_status
 from backend.agent_status_tracker import get_status, get_log
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
-load_dotenv()
 import os
 
+load_dotenv()
 proposal_router = APIRouter()
 
 # ✅ Initialize GPT-4o
@@ -28,35 +26,35 @@ class RFPRequest(BaseModel):
 
 @proposal_router.post("/generate_proposal")
 def generate_proposal(request: RFPRequest):
-    """ Generate a proposal in response to an RFP while leveraging retrieved documents for RAG. """
+    """Generate a proposal in response to an RFP while leveraging retrieved documents for RAG."""
     try:
         rfp_text = request.rfp_text.strip()
         if not rfp_text:
             raise HTTPException(status_code=400, detail="RFP text cannot be empty.")
 
-        # ✅ Step 1: Retrieve Similar Proposals from Pinecone
         from backend.agentic_pipeline import proposal_agentic_graph
         result = proposal_agentic_graph.invoke({"rfp_text": rfp_text})
 
-        proposal = result["proposal"]
+        proposal = remove_unsupported_unicode(result["proposal"])  # ✅ clean proposal text
         retrieved_docs = result["retrieved_docs"]
 
-        conversation_memory["latest_proposal"] = proposal   
-        
+        # ✅ Store cleaned version in memory
+        conversation_memory["latest_proposal"] = proposal
+
         return {
             "proposal": proposal,
-            "retrieved_docs": retrieved_docs,  # ✅ Debugging output
-            "compliance_report": result["compliance_report"],
-            "score_report": result["score_report"]
+            "retrieved_docs": retrieved_docs,
+            "compliance_report": remove_unsupported_unicode(result["compliance_report"]),
+            "score_report": remove_unsupported_unicode(result["score_report"])
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating proposal: {str(e)}")
 
 class RefineRequest(BaseModel):
-    current_proposal: str = None  # optional; we fall back to memory if not provided
+    current_proposal: str = None
     user_feedback: str
-    
+
 @proposal_router.post("/refine_proposal")
 def refine_proposal_endpoint(refine_data: RefineRequest):
     """Refine the latest proposal based on user feedback."""
@@ -69,12 +67,17 @@ def refine_proposal_endpoint(refine_data: RefineRequest):
         if not current_proposal:
             raise HTTPException(status_code=400, detail="No existing proposal to refine.")
 
-        refined_proposal = refine_proposal(current_proposal, user_feedback)
+        refined_result = refine_proposal(current_proposal, user_feedback)
+        refined_proposal = remove_unsupported_unicode(refined_result["refined_proposal"])  # ✅ clean output
 
-        # ✅ Store refined proposal in memory
-        conversation_memory["latest_proposal"] = refined_proposal["refined_proposal"]
+        conversation_memory["latest_proposal"] = refined_proposal
 
-        return {"refined_proposal": refined_proposal["refined_proposal"]}
+        return {
+            "refined_proposal": refined_proposal,
+            "compliance_report": remove_unsupported_unicode(refined_result.get("compliance_report", "")),
+            "score_report": remove_unsupported_unicode(refined_result.get("score_report", ""))
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error refining proposal: {str(e)}")
 
@@ -87,6 +90,7 @@ def get_latest_proposal():
         return {"proposal": "No proposal found. Please generate or refine the proposal first."}
     return {"proposal": latest_proposal}
 
+
 class StoreProposalRequest(BaseModel):
     proposal: str
 
@@ -96,12 +100,15 @@ if "latest_proposal" not in conversation_memory:
 @proposal_router.post("/store_proposal")
 def store_proposal_endpoint(proposal: StoreProposalRequest):
     """API endpoint to store the latest generated proposal."""
-    conversation_memory["latest_proposal"] = proposal.proposal
+    cleaned_proposal = remove_unsupported_unicode(proposal.proposal)
+    conversation_memory["latest_proposal"] = cleaned_proposal
     return {"message": "Proposal stored successfully."}
+
 
 @proposal_router.get("/agent_status")
 def agent_status():
     return get_status()
+
 
 @proposal_router.get("/agent_log")
 def agent_log():

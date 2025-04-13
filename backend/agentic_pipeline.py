@@ -105,7 +105,25 @@ def score_proposal_node(state):
 
 
 # Build the graph
-builder = StateGraph()
+from typing import Dict, Any, TypedDict
+
+class ProposalState(TypedDict, total=False):
+    rfp_text: str
+    metadata: dict
+    industry: str
+    region: str
+    constraints: list
+    client_needs: list
+    retrieved_docs: list
+    summarized_tables: list
+    proposal: str
+    compliance_report: str
+    compliance_passed: bool
+    score_report: str
+
+# Pass it to the graph builder
+builder = StateGraph(state_schema=ProposalState)
+
 
 builder.add_node("Enrich RFP", enrich_rfp_node)
 builder.add_node("Retrieve Docs", retrieve_docs_node)

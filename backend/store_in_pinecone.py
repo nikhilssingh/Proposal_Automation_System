@@ -67,7 +67,7 @@ try:
             print(f"Deleted all vectors in namespace '{ns}'.")
     else:
         print("No namespaces found to delete.")
-except pinecone.core.client.exceptions.NotFoundException:
+except pinecone.core.client.exceptions.NotFoundException: # type: ignore
     print("Namespace not found. No existing documents to delete.")
 except Exception as e:
     print(f"Error deleting documents from Pinecone: {e}")

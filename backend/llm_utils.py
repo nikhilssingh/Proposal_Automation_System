@@ -1,5 +1,6 @@
 # backend/llm_utils.py
 import os
+import re
 from dotenv import load_dotenv
 load_dotenv()
 from langchain_openai import ChatOpenAI
@@ -255,3 +256,8 @@ Respond with a 1–3 sentence summary of what the table is about, what insights 
 """
     response = llm.invoke(prompt)
     return response.content.strip()
+
+
+def remove_unsupported_unicode(text: str) -> str:
+    # Remove characters not supported by latin-1 encoding
+    return text.encode('latin-1', errors='ignore').decode('latin-1')
