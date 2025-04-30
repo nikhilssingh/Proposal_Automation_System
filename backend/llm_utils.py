@@ -1,172 +1,199 @@
 # backend/llm_utils.py
+
 import os
 import re
+import json
+import json5
 from dotenv import load_dotenv
+import time
+from typing import Dict
+import fitz
+import re
+
+# Load environment
 load_dotenv()
-from langchain_openai import ChatOpenAI
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationChain
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import LLMChain
-from langchain.prompts import PromptTemplate
-
-
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
+conversation_memory = {"latest_proposal": ""}
+llm_usage_count = 0
+
+
+# LangChain imports
+from langchain.chat_models import ChatOpenAI
+from langchain_community.chat_models import ChatOpenAI
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationChain
+from langchain.prompts import PromptTemplate
+from langchain.schema import SystemMessage, HumanMessage
+
+# Create a GPT-based LLM with a single import for ChatOpenAI
 llm = ChatOpenAI(
     openai_api_key=openai_api_key,
-    model_name="gpt-4o-mini",
+    model_name="gpt-4o-mini",  # or "gpt-3.5-turbo" or "gpt-4"
     temperature=0.0
 )
 
-def extract_rfp_metadata(rfp_text: str) -> dict:
-    prompt = f"""
-You are an intelligent assistant extracting structured metadata from a client's Request for Proposal (RFP).
+# Add rate limiting
+LAST_CALL_TIME = 0
+MIN_CALL_INTERVAL = 0.5  # 500ms between calls
 
-Given the following RFP text:
-
-{rfp_text}
-
-Extract and return a JSON object with the following fields:
-- project_name
-- client_name (if available)
-- deadline
-- industry (e.g., retail, finance, healthcare)
-- region (e.g., North America, Europe)
-- constraints (list of limitations or must-haves)
-- client_needs (list of pain points or goals mentioned)
-
-Respond with only the JSON.
-"""
-
-    response = llm.invoke(prompt)
+def _rate_limited_call():
+    global LAST_CALL_TIME
+    current_time = time.time()
+    elapsed = current_time - LAST_CALL_TIME
+    if elapsed < MIN_CALL_INTERVAL:
+        time.sleep(MIN_CALL_INTERVAL - elapsed)
+    LAST_CALL_TIME = time.time()
     
+from functools import lru_cache
+
+import fitz  # PyMuPDF
+from typing import Dict
+
+
+
+
+def remove_unsupported_unicode(text: str) -> str:
+    """Remove characters not supported by latin-1 encoding."""
+    return text.encode('latin-1', errors='ignore').decode('latin-1')
+
+@lru_cache(maxsize=32)
+def summarize_text(long_text: str) -> str:
+    """
+    Summarize the text using the global LLM.
+    This function sends a prompt to the LLM to create a short (~100-200 token) summary.
+    """
+    global llm_usage_count
+    _rate_limited_call()
+    llm_usage_count += 1
     try:
-        import json
-        return json.loads(response.content)
+        messages = [
+            SystemMessage(content=(
+                "You are a helpful assistant. Summarize the user's text in ~100-200 tokens. "
+                "Focus only on core details. Output plain text."
+            )),
+            HumanMessage(content=long_text)
+        ]
+        response = llm.invoke(messages)
+        return response.content.strip()
     except Exception as e:
-        print("⚠️ Metadata extraction failed:", e)
-        return {
-            "project_name": "",
-            "client_name": "",
-            "deadline": "",
-            "industry": "generic",
-            "region": "global",
-            "constraints": [],
-            "client_needs": []
-        }
+        print(f"⚠️ Summarize text failed: {e}")
+        return long_text[:1000]
+    
+def extract_rfp_metadata(rfp_text: str) -> dict:
+    global llm_usage_count
+    extracted_metadata = {
+        "project_name": "",
+        "client_name": "",
+        "deadline": "",
+        "industry": "generic",
+        "region": "global",
+        "constraints": [],
+        "client_needs": []
+    }
+
+    def safe_json_parse(content: str) -> dict:
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            print("⚠️ JSON decode failed. Attempting recovery with json5...")
+            try:
+                return json5.loads(content.strip())
+            except Exception as e:
+                print(f"❌ Recovery with json5 also failed: {e}")
+                return {}
+
+    chunk_size = 5000
+    chunks = [rfp_text[i:i + chunk_size] for i in range(0, len(rfp_text), chunk_size)]
+
+    for idx, chunk in enumerate(chunks[:1]):  # Only use first 1 chunk for metadata
+        messages = [
+            SystemMessage(content=(
+                "Extract this metadata from the RFP chunk in pure JSON, with keys:\n"
+                " - project_name\n - client_name\n - deadline\n"
+                " - industry\n - region\n - constraints\n - client_needs\n\n"
+                "Return JSON only. If unknown, leave them empty or null."
+            )),
+            HumanMessage(content=chunk)
+        ]
+        try:
+            _rate_limited_call()
+            llm_usage_count += 1
+            response = llm.invoke(messages)
+            content = response.content.strip()
+            if not content.startswith("{"):
+                print(f"⚠️ Chunk {idx} returned non-JSON:\n{content[:300]}")
+                continue
+            metadata_chunk = safe_json_parse(content)
+            for k, v in metadata_chunk.items():
+                if isinstance(v, list):
+                    extracted_metadata.setdefault(k, [])
+                    extracted_metadata[k].extend(v)
+                elif v and not extracted_metadata.get(k):
+                    extracted_metadata[k] = v
+        except Exception as e:
+            print(f"⚠️ Failed on chunk {idx}: {e}")
+            continue
+
+    # Deduplicate
+    if isinstance(extracted_metadata["constraints"], list):
+        extracted_metadata["constraints"] = list(set(extracted_metadata["constraints"]))
+    if isinstance(extracted_metadata["client_needs"], list):
+        extracted_metadata["client_needs"] = list(set(extracted_metadata["client_needs"]))
+
+    return extracted_metadata
 
 
 def expand_rfp(rfp_text, retrieved_docs, summarized_tables=None):
-    """Generates a thorough business proposal in response to an RFP, leveraging past proposals and summarized table insights."""
-
-    structured_context = "\n\n".join([
-        f"🔹 **Reference Proposal {i+1}**:\n{doc}" for i, doc in enumerate(retrieved_docs)
-    ]) if retrieved_docs else "No similar documents found."
-    
+    global llm_usage_count
+    _rate_limited_call()
+    llm_usage_count += 1
+    if retrieved_docs and isinstance(retrieved_docs, list):
+        structured_context = "\n\n".join([
+            f"🔹 **Reference Proposal {i+1}**:\n{doc}" for i, doc in enumerate(retrieved_docs)
+        ])
+    else:
+        structured_context = "No similar documents found."
     summarized_tables = summarized_tables or []
     table_context = "\n\n".join(summarized_tables)
-
     prompt = f"""
-You are a professional business consultant responding to a client’s RFP. Your task is to generate a **thorough business proposal** that directly addresses the client's needs.
+You are a professional business consultant responding to a client’s RFP. 
+Generate a **thorough business proposal** that addresses the client's needs.
 
----
-**📜 Client’s RFP to Respond To:**
+--- 
+**📜 Client’s RFP:**
 {rfp_text}
 
----
-**📂 Past Successful Proposals (USE THESE TO SHAPE THE RESPONSE and fill in the company name, contact information, etc. and structure which is redundant from the past proposals):**
+--- 
+**📂 Past Successful Proposals (Reference them as needed)**:
 {structured_context}
 
----
-**🧾 Table Insights (Summarized Explanations):**
+--- 
+**🧾 Summarized Table Insights**:
 {table_context}
 
----
-**Proposal Format:**
-
-📌 **Cover Letter**  
-- Start with a compelling opening that differentiates us.  
-- Showcase our expertise and success in similar projects.  
-- End with a warm call to action.  
-
-📌 **Understanding of Client Needs**  
-- Identify key challenges mentioned in the RFP.  
-- Use retrieved proposals to match solutions to the client’s goals.  
-
-📌 **Proposed Solution**  
-- Tailor the response using **retrieved past proposals** (inventory optimization, customer recommendations, etc.).  
-- Clearly describe the AI-driven enhancements.  
-
-📌 **Project Plan & Implementation Timeline**  
-- **Assign team members** to each phase for credibility.  
-- Provide detailed milestones and clear deliverables.  
-
-📌 **Pricing & Payment Terms**  
-- Extract competitive pricing from past proposals.  
-- Justify the investment with **ROI-driven language**.  
-
-📌 **Technical Approach**  
-- Explain AI models, data processing, and security measures.  
-
-📌 **Company Experience**  
-- Highlight **measurable successes** from past projects.  
-- Include relevant testimonials and case studies.  
-
-📌 **Case Studies & Testimonials**  
-- Use real success stories with **quantifiable impact** (e.g., 20% increase in efficiency).  
-
-📌 **Conclusion & Call to Action**  
-- End with a clear **next step** (e.g., scheduling a consultation call).  
-- Ensure persuasive, client-centered writing.  
-
-🎯 **Important:**  
-- Reference **retrieved proposals** in relevant sections.  
-- Use **table summaries** to justify decisions, showcase features, or support pricing or planning logic.
+--- 
+**Proposal Format**:
+1) Cover Letter
+2) Understanding of Client Needs
+3) Proposed Solution
+4) Project Plan & Implementation Timeline
+5) Pricing & Payment Terms
+6) Technical Approach
+7) Company Experience
+8) Case Studies & Testimonials
+9) Conclusion & Call to Action
 """
-
-    print(f"\n📝 Sending this prompt to GPT:\n{prompt[:1500]}")  # ✅ Debugging output
-
-    response = llm.invoke(prompt)
+    response = llm.invoke([HumanMessage(content=prompt)])
     return response.content.strip()
 
-
-
-# Maintain memory for ongoing refinements
-conversation_memory = {"latest_proposal": ""}
-
-# --- Create a conversational chain for proposal refinement ---
-
-# Define a prompt template that will include the conversation history and new feedback.
-refine_prompt_template = PromptTemplate(
-    input_variables=["chat_history", "input"],
-    template="""
-You are an expert proposal writer tasked with refining a business proposal based on user feedback.
-
-Conversation History:
-{chat_history}
-
-User Feedback:
-{input}
-
-Please produce an updated proposal that incorporates this feedback while preserving all previous refinements.
-"""
-)
-
-# Create a memory object to hold the conversation history.
-refine_memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-# Create the conversational chain using the prompt template and memory.
-refine_chain = ConversationChain(
-    llm=llm,
-    prompt=refine_prompt_template,
-    memory=refine_memory
-)
- 
 def refine_proposal(current_proposal: str, user_feedback: str) -> dict:
-    # Construct a prompt that combines the current proposal and the user feedback.
+    global llm_usage_count
+    _rate_limited_call()
+    llm_usage_count += 1
     prompt = f"""
-You are an expert proposal writer. Given the current proposal below and the user feedback provided, generate a refined proposal that incorporates the feedback and improves upon the original.
+You are an expert proposal writer. Given the current proposal below and the user feedback provided,
+generate a refined proposal that incorporates the feedback and improves upon the original.
 
 Current Proposal:
 {current_proposal}
@@ -176,88 +203,80 @@ User Feedback:
 
 Refined Proposal:
 """
-    # Call the LLM directly with the new prompt.
-    response = llm.invoke(prompt)
+    response = llm.invoke([HumanMessage(content=prompt)])
     refined_proposal = response.content.strip()
-    
-    # Update the global conversation memory with the new refined proposal.
     conversation_memory["latest_proposal"] = refined_proposal
-    
     return {"refined_proposal": refined_proposal}
 
-
 def optimize_proposal_tone(proposal: str, vertical: str = "generic", tone: str = "professional") -> str:
+    global llm_usage_count
+    llm_usage_count += 1
     prompt = f"""
-You are a senior business strategist. Your task is to optimize the following proposal to better align with the target industry and client expectations.
+You are a senior business strategist. Optimize the following proposal to align with the '{vertical}' industry and a '{tone}' tone.
 
----
-📝 **Original Proposal:**
+Original Proposal:
 {proposal}
 
-🎯 **Target Industry (Vertical)**: {vertical}
-🎙️ **Preferred Tone**: {tone}
-
----
-Please revise the proposal accordingly. Ensure it's still well-structured, clear, and persuasive.
+Revised / Optimized Proposal:
 """
-    response = llm.invoke(prompt)
+    response = llm.invoke([HumanMessage(content=prompt)])
     return response.content.strip()
 
 def check_compliance(rfp_text: str, proposal: str) -> str:
+    global llm_usage_count
+    _rate_limited_call()
+    llm_usage_count += 1
     prompt = f"""
-You are a compliance auditor. Given the client's RFP and our current proposal draft, check if the proposal fully addresses all key requirements, constraints, and mandatory elements.
+You are a compliance auditor. Given the client's RFP and our proposal, check if we address key requirements, constraints, and mandatory elements.
 
----
-📜 **Client RFP:**
+Client RFP:
 {rfp_text}
 
-📝 **Our Proposal:**
+Our Proposal:
 {proposal}
 
----
-List all major areas:
+List major areas:
 - ✅ Fully addressed
 - ⚠️ Partially addressed
 - ❌ Missing
 
-Be detailed and structured.
+Be detailed.
 """
-    response = llm.invoke(prompt)
+    response = llm.invoke([HumanMessage(content=prompt)])
     return response.content.strip()
 
 def score_proposal_quality(proposal: str) -> str:
+    global llm_usage_count
+    _rate_limited_call()
+    llm_usage_count += 1
     prompt = f"""
-You are a senior proposal reviewer. Evaluate the following proposal and assign scores (1 to 10) for:
+You are a senior proposal reviewer. Evaluate the following proposal from 1 to 10 in:
+1) Clarity
+2) Persuasiveness
+3) Technical Depth
+4) Alignment with Client Needs
+5) Overall Quality
 
-1. Clarity of Communication
-2. Persuasiveness & Tone
-3. Technical Depth & Feasibility
-4. Alignment with Client Needs
-5. Overall Quality
-
----
-📝 Proposal:
+Proposal:
 {proposal}
-
-Return scores and a short explanation for each.
 """
-    response = llm.invoke(prompt)
+    response = llm.invoke([HumanMessage(content=prompt)])
     return response.content.strip()
-
 
 def summarize_table(markdown_table: str) -> str:
+    global llm_usage_count
+    _rate_limited_call()
+    llm_usage_count += 1
     prompt = f"""
-You are a business analyst. Given the following table from a proposal or RFP, explain its purpose and contents in simple English.
+You are a business analyst. Summarize the purpose, structure, and key insights of this table:
 
-Table:
 {markdown_table}
 
-Respond with a 1–3 sentence summary of what the table is about, what insights it provides, and which section of a proposal it might belong to.
+Reply in 1-3 sentences.
 """
-    response = llm.invoke(prompt)
+    response = llm.invoke([HumanMessage(content=prompt)])
     return response.content.strip()
 
 
-def remove_unsupported_unicode(text: str) -> str:
-    # Remove characters not supported by latin-1 encoding
-    return text.encode('latin-1', errors='ignore').decode('latin-1')
+
+

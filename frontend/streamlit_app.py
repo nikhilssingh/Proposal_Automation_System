@@ -1,246 +1,246 @@
 import streamlit as st
 import requests
-from fpdf import FPDF
 import time
 import os
+from pathlib import Path
+from datetime import datetime, timedelta
+import sys
+from io import BytesIO
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase import pdfmetrics
 
-# FastAPI Backend URL
-API_URL = "http://127.0.0.1:8000"
+# register a Unicode font once at import time
+pdfmetrics.registerFont(TTFont("DejaVu", "fonts/DejaVuSans.ttf"))  # put the TTF here
+# Allow “backend.” imports when running from /frontend
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# ---------------------------- CONFIG ----------------------------
+API_URL        = "http://127.0.0.1:8000"
+POLL_INTERVAL  = 5          # seconds between polling backend
+MAX_POLL_TIME  = 1800       # 30 min safety timeout
+OUTPUT_DIR     = Path("output")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+# ----------------------- SESSION HELPERS ------------------------
+def init_session_state():
+    defaults = {
+        "current_proposal": "",
+        "proposal_generated": False,
+        "proposal_refined":  False,
+        "compliance_report": "",
+        "score_report":      "",
+        "table_summaries":   [],
+        "llm_calls":         0,
+        "last_status":       {},
+        "last_log":          "",
+        "last_status_check": datetime.now() - timedelta(seconds=10),
+        "last_log_check":    datetime.now() - timedelta(seconds=10),
+        "file_uploaded":     False,
+        "processing_started":False,
+        "pipeline_id":       None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+PAGE_WIDTH, PAGE_HEIGHT = 595, 842   # A4 in points
+LEFT, TOP, BOTTOM = 40, 800, 40      # margins (x, y_start, y_bottom)
+LEADING = 14                         # line height (11-pt font + 3 pt)
+
+def build_pdf(text: str) -> bytes:
+    buf = BytesIO()
+    c   = canvas.Canvas(buf, pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
+
+    def new_text_object():
+        t = c.beginText(LEFT, TOP)
+        t.setFont("DejaVu", 11)
+        return t
+
+    text_obj = new_text_object()
+    y_cursor = TOP
+
+    for line in text.splitlines():
+        # hard-wrap very long “words” so they break nicely
+        for frag in _wrap_long_word(line, max_chunk=80):
+            if y_cursor < BOTTOM + LEADING:          # need new page
+                c.drawText(text_obj)
+                c.showPage()
+                text_obj = new_text_object()
+                y_cursor = TOP
+            text_obj.textLine(frag)
+            y_cursor -= LEADING
+
+    c.drawText(text_obj)
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+def _wrap_long_word(line: str, max_chunk: int = 80):
+    """
+    Yield the line split so no single word exceeds max_chunk chars.
+    """
+    import textwrap, re
+    def breaker(match):
+        word = match.group(0)
+        return "\n".join(textwrap.wrap(word, max_chunk))
+    return re.sub(r"\S{" + str(max_chunk) + r",}", breaker, line).split("\n")
+
+
+def reset_backend():
+    try:
+        requests.get(f"{API_URL}/rfp/reset_status", timeout=2)
+    except Exception:
+        pass
+
+def get_cached_status():
+    if (datetime.now() - st.session_state.last_status_check).seconds < POLL_INTERVAL:
+        return st.session_state.last_status
+    try:
+        res = requests.get(f"{API_URL}/proposal/agent_status", timeout=2)
+        if res.ok:
+            st.session_state.last_status = res.json()
+            st.session_state.last_status_check = datetime.now()
+    except Exception:
+        pass
+    return st.session_state.last_status
+
+def get_cached_log():
+    if (datetime.now() - st.session_state.last_log_check).seconds < POLL_INTERVAL:
+        return st.session_state.last_log
+    try:
+        res = requests.get(f"{API_URL}/proposal/agent_log", timeout=2)
+        if res.ok:
+            st.session_state.last_log = res.text
+            st.session_state.last_log_check = datetime.now()
+    except Exception:
+        pass
+    return st.session_state.last_log
+
+# -------------------------- UI START ----------------------------
+init_session_state()
 st.title("📄 AI-Powered RFP Automation System")
 
-# Initialize Session State Variables
-if "current_proposal" not in st.session_state:
-    st.session_state.current_proposal = ""
-if "proposal_generated" not in st.session_state:
-    st.session_state.proposal_generated = False
-if "proposal_refined" not in st.session_state:
-    st.session_state.proposal_refined = False
+# ----------- 1) Upload RFP ----------
+if not st.session_state.file_uploaded:
+    st.header("📂 Upload an RFP Document")
+    up_file = st.file_uploader("Upload a PDF or TXT file", type=["pdf", "txt"])
+    if up_file and st.button("Start Proposal Pipeline"):
+        with st.spinner("📤 Uploading file…"):
+            try:
+                files = {"file": (up_file.name, up_file.getvalue())}
+                res   = requests.post(f"{API_URL}/rfp/upload_rfp", files=files, timeout=10)
+                if res.ok:
+                    st.session_state.pipeline_id      = res.json().get("pipeline_id")
+                    st.session_state.file_uploaded    = True
+                    st.session_state.processing_started = True
+                    st.success("✅ File uploaded. Processing…")
+                else:
+                    st.error("❌ File upload failed.")
+            except Exception as e:
+                st.error(f"❌ Connection error: {e}")
 
-# For compliance & score reports
-if "compliance_report" not in st.session_state:
-    st.session_state.compliance_report = ""
-if "score_report" not in st.session_state:
-    st.session_state.score_report = ""
-
-# --- Step 1: Upload and Generate Proposal (only once) ---
-st.header("📂 Upload an RFP Document")
-if not st.session_state.proposal_generated:
-    uploaded_file = st.file_uploader("Upload a PDF or TXT file", type=["pdf", "txt"])
-    if uploaded_file:
-        files = {"file": uploaded_file.getvalue()}
-        response = requests.post(f"{API_URL}/rfp/upload_rfp", files=files)
-        if response.status_code == 200:
-            result = response.json()
-            extracted_rfp_text = result["extracted_text"]
-            st.success(f"✅ File Uploaded: {result['filename']}")
-            st.write("📜 **Extracted Text Preview:**", extracted_rfp_text[:500])
-
-            # Generate the initial proposal
-            proposal_response = requests.post(
-                f"{API_URL}/proposal/generate_proposal",
-                json={
-                    "rfp_text": extracted_rfp_text,
-                    "retrieved_docs": []
-                }
-            )
-            if proposal_response.status_code == 200:
-                gen_result = proposal_response.json()
-
-                # Store text-based fields
-                st.session_state.current_proposal = gen_result.get("proposal", "")
-                st.session_state.proposal_generated = True
-
-                # OPTIONAL: If your backend returns these, store them
-                st.session_state.compliance_report = gen_result.get("compliance_report", "")
-                st.session_state.score_report = gen_result.get("score_report", "")
-
-                st.success("✅ Proposal Generated!")
-                st.write("📌 **Generated Proposal:**", st.session_state.current_proposal)
-
-                # Store the proposal in the backend
-                requests.post(
-                    f"{API_URL}/proposal/store_proposal",
-                    json={"proposal": st.session_state.current_proposal}
+# ----------- 2) Poll until proposal is ready ----------
+if st.session_state.processing_started and not st.session_state.proposal_generated:
+    with st.spinner("🧠 Generating proposal…"):
+        start = datetime.now()
+        while (datetime.now() - start).seconds < MAX_POLL_TIME:
+            try:
+                res = requests.get(
+                    f"{API_URL}/rfp/result/{st.session_state.pipeline_id}", timeout=5
                 )
-            else:
-                st.error(f"❌ Error generating proposal: {proposal_response.text}")
+                if res.ok:
+                    result = res.json()
+                    if result.get("status") == "complete":
+                        st.session_state.update(
+                            current_proposal  = result.get("proposal", ""),
+                            proposal_generated=True,
+                            compliance_report = result.get("compliance_report", ""),
+                            score_report      = result.get("score_report", ""),
+                            table_summaries   = result.get("summarized_tables", []),
+                            llm_calls         = result.get("llm_usage_count", 0),
+                        )
+                        st.rerun()
+                        break
+                    if result.get("status") == "failed":
+                        st.error(f"❌ Pipeline failed: {result.get('error', 'Unknown error')}")
+                        st.session_state.processing_started = False
+                        break
+                time.sleep(POLL_INTERVAL)
+            except Exception as e:
+                st.warning(f"⚠️ Temporary connection issue: {e}")
+                time.sleep(POLL_INTERVAL)
         else:
-            st.error("❌ File upload failed.")
-else:
-    st.write("Using previously generated proposal:")
+            st.error("❌ Timed out waiting for proposal generation.")
+            st.session_state.processing_started = False
+
+# ----------- 3) Display proposal & refinement ----------
+if st.session_state.proposal_generated:
+    st.header("📄 Generated Proposal")
     st.write(st.session_state.current_proposal)
 
-# --- Step 2: Refine the Proposal ---
-st.header("🛠️ Refine Proposal")
-user_feedback = st.text_area("Your Feedback", height=100)
+    # ---------- Download as PDF (ReportLab) ----------
+    if st.button("⬇️ Download proposal as PDF"):
+        pdf_bytes = build_pdf(st.session_state.current_proposal)
+        st.download_button("Download PDF", pdf_bytes,
+                           file_name="proposal.pdf",
+                           mime="application/pdf")
 
-if st.button("Refine Proposal"):
-    if user_feedback:
-        refine_response = requests.post(
-            f"{API_URL}/proposal/refine_proposal",
-            json={"user_feedback": user_feedback}
-        )
-        if refine_response.status_code == 200:
-            ref_result = refine_response.json()
-            refined_proposal = ref_result.get("refined_proposal", "")
-
-            if refined_proposal:
-                st.session_state.current_proposal = refined_proposal
-                st.session_state.proposal_refined = True
-
-                # OPTIONAL: If your backend also returns compliance/score here:
-                st.session_state.compliance_report = ref_result.get("compliance_report", "")
-                st.session_state.score_report = ref_result.get("score_report", "")
-
-                st.success("✅ Proposal Refined!")
-                st.write("📌 **Refined Proposal:**", refined_proposal)
-
-                # Update the backend with the refined proposal
-                requests.post(
-                    f"{API_URL}/proposal/store_proposal",
-                    json={"proposal": refined_proposal}
+    # ---------- Refine ----------
+    st.header("🛠️ Refine Proposal")
+    feedback = st.text_area("Your feedback", height=100)
+    if st.button("Refine Proposal") and feedback:
+        try:
+            res=requests.post(
+                f"{API_URL}/proposal/refine_proposal",
+                json={
+                    "current_proposal": st.session_state.current_proposal,
+                    "user_feedback":    feedback
+                },
+                timeout=60
+            )
+            if res.ok:
+                data=res.json()
+                st.session_state.update(
+                    current_proposal =data["refined_proposal"],
+                    proposal_refined =True,
+                    compliance_report=data.get("compliance_report",""),
+                    score_report     =data.get("score_report","")
                 )
+                st.success("✅ Refined!")
+                st.rerun()
             else:
-                st.warning("⚠️ No changes were made.")
-        else:
-            st.error(f"❌ Error refining proposal: {refine_response.text}")
+                st.error(res.text)
+        except Exception as e:
+            st.error(f"❌ {e}")
 
-# --- Step 3: Export the Latest Proposal as PDF ---
-st.header("📤 Finalize & Export")
-if st.button("Submit and Export as PDF"):
-    # Always fetch the latest proposal from the backend (with cache busting)
-    response = requests.get(f"{API_URL}/proposal/get_latest_proposal?timestamp={time.time()}")
-    if response.status_code == 200:
-        final_proposal_text = response.json().get("proposal", "")
-        # Debug: display the proposal fetched from the backend
-        st.write("DEBUG: Backend returned proposal:", final_proposal_text)
-    else:
-        st.error("Failed to fetch the latest proposal.")
-        final_proposal_text = ""
-
-    if not final_proposal_text.strip():
-        st.error("❌ No final proposal found. Please refine or generate the proposal first.")
-    else:
-        # Update session state with the fetched proposal
-        st.session_state.current_proposal = final_proposal_text
-
-        # Create the PDF using the latest refined proposal
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.add_page()
-
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-
-        font_path = os.path.join(current_dir, "fonts", "DejaVuSans.ttf")
-
-        pdf.add_font("DejaVu", "", font_path, uni=True)
-        pdf.set_font("DejaVu", "", 11)
-    
-        pdf.set_left_margin(10)
-        pdf.set_right_margin(10)
-        formatted_text = "\n".join(
-            line.strip() for line in final_proposal_text.split("\n") if line.strip()
-        )
-        pdf.multi_cell(0, 8, txt=formatted_text, border=0)
-        pdf_output = bytes(pdf.output(dest="S"))
-
-        st.download_button(
-            label="📥 Download Proposal PDF",
-            data=pdf_output,
-            file_name=f"final_proposal_{int(time.time())}.pdf",  # unique filename to avoid caching issues
-            mime="application/pdf"
-        )
-
-# --- Compliance & Score (Optional) ---
-# Display them if we have them in session state:
+# ----------- 4) Compliance & scoring ----------
 if st.session_state.compliance_report:
     st.subheader("📋 Compliance Check")
     st.write(st.session_state.compliance_report)
 
 if st.session_state.score_report:
-    st.subheader("📊 Proposal Scorecard")
+    st.subheader("📈 Proposal Scorecard")
     st.write(st.session_state.score_report)
 
+# ----------- 5) Agent dashboard ----------
 st.markdown("---")
-st.subheader("🤖 Agent Status Dashboard + Audit Log")
+st.subheader("🧠 Agent-Status Dashboard")
+def fmt(s):  # color helper
+    return (
+        f":green[{s}]" if "✅" in s else
+        f":red[{s}]"  if "❌" in s else
+        f":blue[{s}]" if "🧠" in s else
+        f":gray[{s}]"
+    )
+for agent, info in get_cached_status().items():
+    st.markdown(f"**{agent}**: {fmt(info['state'])} _(at {info['timestamp']})_")
 
-# Toggle to activate real-time polling
-live_mode = st.checkbox("🔄 Enable Live Polling (30s)", value=False)
+st.subheader("📜 Execution Log")
+st.text_area("Log", get_cached_log(), height=200, key="agent_log_display")
 
-agent_keys = [
-    "RFP Analyzer",
-    "Context Retriever",
-    "Table Summarizer",
-    "Proposal Generator",
-    "Strategy Optimizer",
-    "Compliance Checker",
-    "Scorer"
-]
-
-def fetch_agent_status():
-    try:
-        res = requests.get(f"{API_URL}/proposal/agent_status")
-        if res.status_code == 200:
-            return res.json()
-    except:
-        return {k: {"state": "❌ Connection error", "timestamp": "—"} for k in agent_keys}
-
-
-def fetch_agent_log():
-    try:
-        res = requests.get(f"{API_URL}/proposal/agent_log")
-        return res.text if res.status_code == 200 else "Log unavailable."
-    except:
-        return "Error retrieving logs."
-
-def format_status(status):
-    if "✅" in status:
-        return f":green[{status}]"
-    elif "❌" in status:
-        return f":red[{status}]"
-    elif "🧠" in status:
-        return f":blue[{status}]"
-    else:
-        return f":gray[{status}]"
-
-status_placeholder = st.empty()
-log_placeholder = st.empty()
-
-if live_mode:
-    for _ in range(10):  # ~30 seconds of polling
-        agent_status = fetch_agent_status()
-        agent_log = fetch_agent_log()
-
-        with status_placeholder.container():
-            st.subheader("🧠 Current Agent Status")
-            for agent, obj in agent_status.items():
-                st.markdown(f"**{agent}**: {format_status(obj['state'])} _(at {obj['timestamp']})_")
-
-        with log_placeholder.container():
-            st.subheader("📜 Agent Execution Log")
-            st.text_area("Audit Log", agent_log, height=250)
-
-        time.sleep(3)
-        st.experimental_rerun()
-else:
-    agent_status = fetch_agent_status()
-    agent_log = fetch_agent_log()
-
-    with status_placeholder.container():
-        st.subheader("🧠 Current Agent Status")
-        for agent, obj in agent_status.items():
-            st.markdown(f"**{agent}**: {format_status(obj['state'])} _(at {obj['timestamp']})_")
-
-    with log_placeholder.container():
-        st.subheader("📜 Agent Execution Log")
-        st.text_area("Audit Log", agent_log, height=250)
-
-st.caption(f"⏱️ Last updated: {time.strftime('%H:%M:%S')}")
-
-# Reset session button
+# ----------- 6) Reset ----------
 if st.button("♻️ Reset Session"):
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    st.experimental_rerun()
-
+    reset_backend()
+    st.session_state.clear()
+    st.rerun()

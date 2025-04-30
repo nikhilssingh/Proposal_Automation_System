@@ -1,66 +1,49 @@
-#parse_rfp_pdf.py
-
 import pdfplumber
-import fitz  # PyMuPDF
 import pytesseract
+from pdf2image import convert_from_path
 from PIL import Image
-import io
-import logging
 import os
+os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+def extract_text_and_tables(pdf_path: str):
+    text_body = ""
+    all_tables = []
 
-# If Tesseract-OCR is not installed at default location, set path manually:
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"  # Windows Example
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            # Extract regular text
+            text = page.extract_text()
+            if text:
+                text_body += text + "\n"
 
-def parse_rfp_pdf(pdf_path: str) -> str:
-    """
-    Extracts text, tables, and image metadata from a PDF file.
-    Uses pdfplumber for structured content and OCR as fallback.
-    """
-    extracted_text = ""
-    tables = []
-    image_descriptions = []
+            # Extract tables (as 2D arrays)
+            tables = page.extract_tables()
+            if tables:
+                all_tables.extend(tables)
 
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for i, page in enumerate(pdf.pages):
-                # --- Extract normal text
-                page_text = page.extract_text()
-                if page_text:
-                    extracted_text += f"\n[Text from Page {i+1}]\n{page_text}\n"
+    return text_body.strip(), all_tables
 
-                # --- Extract tables
-                extracted_tables = page.extract_tables()
-                for tbl in extracted_tables:
-                    if tbl:
-                        table_str = "\n".join([" | ".join(row) for row in tbl if any(row)])
-                        tables.append(f"\n📊 Table from Page {i+1}:\n{table_str}\n")
+def extract_ocr_text_from_images(pdf_path: str):
+    images = convert_from_path(pdf_path)
+    ocr_text = ""
 
-                # --- OCR on image of the page
-                image = page.to_image(resolution=300)
-                img = image.original
-                ocr_text = pytesseract.image_to_string(img)
-                if ocr_text.strip():
-                    extracted_text += f"\n[OCR from Page {i+1} Image]\n{ocr_text.strip()}\n"
+    for img in images:
+        gray = img.convert("L")
+        ocr_text += pytesseract.image_to_string(gray) + "\n"
+        img = img.convert("RGB")
+        ocr_text += pytesseract.image_to_string(img) + "\n"
 
-                # --- Log presence of embedded images
-                for img in page.images:
-                    image_descriptions.append(
-                        f"📷 Image found on Page {i+1} (Position: x={img['x0']}, y={img['top']})"
-                    )
 
-        full_text = "\n".join([
-            extracted_text.strip(),
-            "\n".join(tables),
-            "\n".join(image_descriptions)
-        ])
 
-        logging.info(f"✅ Extracted text, tables, and image metadata from {pdf_path}")
-        return full_text.strip()
+    return ocr_text.strip()
 
-    except Exception as e:
-        logging.error(f"❌ Failed to parse PDF: {pdf_path} – {e}")
-        return "Error: Unable to process the PDF."
+def parse_rfp_pdf(pdf_path: str):
+    text_body, tables = extract_text_and_tables(pdf_path)
+    ocr_text = extract_ocr_text_from_images(pdf_path)
 
+    return {
+        "text_body": text_body,
+        "tables": tables,
+        "ocr_text": ocr_text
+    }
