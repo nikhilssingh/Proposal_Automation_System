@@ -1,30 +1,30 @@
 {
   "RFP Analyzer": {
     "state": "\u2705 Done",
-    "timestamp": "2025-05-01 22:55:18"
+    "timestamp": "2025-05-02 04:14:08"
   },
   "Context Retriever": {
     "state": "\u2705 Done",
-    "timestamp": "2025-05-01 22:55:23"
+    "timestamp": "2025-05-02 04:14:15"
   },
   "Table Summarizer": {
-    "state": "\u2705 Done",
-    "timestamp": "2025-05-01 22:56:38"
+    "state": "\u2705 Done (no tables)",
+    "timestamp": "2025-05-02 04:14:15"
   },
   "Proposal Generator": {
     "state": "\u2705 Done",
-    "timestamp": "2025-05-01 22:57:05"
+    "timestamp": "2025-05-02 04:14:43"
   },
   "Strategy Optimizer": {
     "state": "\u2705 Done",
-    "timestamp": "2025-05-01 22:57:27"
+    "timestamp": "2025-05-02 04:15:21"
   },
   "Compliance Checker": {
     "state": "\u2705 Done",
-    "timestamp": "2025-05-01 22:57:46"
+    "timestamp": "2025-05-02 04:15:42"
   },
   "Scorer": {
     "state": "\u2705 Done",
-    "timestamp": "2025-05-01 22:57:53"
+    "timestamp": "2025-05-02 04:15:54"
   }
 }

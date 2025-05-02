@@ -10,6 +10,7 @@ from typing import Dict
 import fitz
 import re
 
+
 # Load environment
 load_dotenv()
 openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -17,7 +18,36 @@ openai_api_key = os.getenv("OPENAI_API_KEY")
 conversation_memory = {"latest_proposal": ""}
 llm_usage_count = 0
 
+from backend.path_utils import LOG_DIR
+token_tally = {
+    "fresh_prompt": 0,
+    "cached_prompt": 0,
+    "completion": 0,
+    "training": 0,
+}
 
+TOKEN_FILE = LOG_DIR / "token_usage.json"
+
+def _record_usage(usage: dict):
+    print(">>> logging usage", usage)             # DEBUG
+    """
+    usage structure as returned by OpenAI:
+    {
+        "prompt_tokens": …,
+        "cached_prompt_tokens": …,   # may be absent
+        "completion_tokens": …,
+        "training_tokens": …         # only during fine‑tune
+    }
+    """
+    token_tally["fresh_prompt"]  += usage.get("prompt_tokens", 0) - usage.get("cached_prompt_tokens", 0)
+    token_tally["cached_prompt"] += usage.get("cached_prompt_tokens", 0)
+    token_tally["completion"]    += usage.get("completion_tokens", 0)
+    token_tally["training"]      += usage.get("training_tokens", 0)
+
+    # write cumulative totals so evaluator can read anytime
+    TOKEN_FILE.parent.mkdir(exist_ok=True)
+    TOKEN_FILE.write_text(json.dumps(token_tally)) 
+    
 # LangChain imports
 from langchain.chat_models import ChatOpenAI
 from langchain_community.chat_models import ChatOpenAI
@@ -75,6 +105,11 @@ def summarize_text(long_text: str) -> str:
             HumanMessage(content=long_text)
         ]
         response = llm.invoke(messages)
+        usage = response.additional_kwargs.get("usage")   # <— SAFE LOOK‑UP
+        if usage:                                         # only when OpenAI returns it
+            _record_usage(usage)
+        else:
+            print("⚠️  No usage info returned for this call")
         return response.content.strip()
     except Exception as e:
         print(f"⚠️ Summarize text failed: {e}")
@@ -120,6 +155,11 @@ def extract_rfp_metadata(rfp_text: str) -> dict:
             _rate_limited_call()
             llm_usage_count += 1
             response = llm.invoke(messages)
+            usage = response.additional_kwargs.get("usage")   # <— SAFE LOOK‑UP
+            if usage:                                         # only when OpenAI returns it
+                _record_usage(usage)
+            else:
+                print("⚠️  No usage info returned for this call")
             content = response.content.strip()
             if not content.startswith("{"):
                 print(f"⚠️ Chunk {idx} returned non-JSON:\n{content[:300]}")
@@ -185,6 +225,11 @@ Generate a **thorough business proposal** that addresses the client's needs.
 9) Conclusion & Call to Action
 """
     response = llm.invoke([HumanMessage(content=prompt)])
+    usage = response.additional_kwargs.get("usage")   # <— SAFE LOOK‑UP
+    if usage:                                         # only when OpenAI returns it
+        _record_usage(usage)
+    else:
+        print("⚠️  No usage info returned for this call")
     return response.content.strip()
 
 def refine_proposal(current_proposal: str, user_feedback: str) -> dict:
@@ -204,6 +249,11 @@ User Feedback:
 Refined Proposal:
 """
     response = llm.invoke([HumanMessage(content=prompt)])
+    usage = response.additional_kwargs.get("usage")   # <— SAFE LOOK‑UP
+    if usage:                                         # only when OpenAI returns it
+        _record_usage(usage)
+    else:
+        print("⚠️  No usage info returned for this call")
     refined_proposal = response.content.strip()
     conversation_memory["latest_proposal"] = refined_proposal
     return {"refined_proposal": refined_proposal}
@@ -220,6 +270,11 @@ Original Proposal:
 Revised / Optimized Proposal:
 """
     response = llm.invoke([HumanMessage(content=prompt)])
+    usage = response.additional_kwargs.get("usage")   # <— SAFE LOOK‑UP
+    if usage:                                         # only when OpenAI returns it
+        _record_usage(usage)
+    else:
+        print("⚠️  No usage info returned for this call")
     return response.content.strip()
 
 def check_compliance(rfp_text: str, proposal: str) -> str:
@@ -243,6 +298,11 @@ List major areas:
 Be detailed.
 """
     response = llm.invoke([HumanMessage(content=prompt)])
+    usage = response.additional_kwargs.get("usage")   # <— SAFE LOOK‑UP
+    if usage:                                         # only when OpenAI returns it
+        _record_usage(usage)
+    else:
+        print("⚠️  No usage info returned for this call")
     return response.content.strip()
 
 def score_proposal_quality(proposal: str) -> str:
@@ -261,6 +321,11 @@ Proposal:
 {proposal}
 """
     response = llm.invoke([HumanMessage(content=prompt)])
+    usage = response.additional_kwargs.get("usage")   # <— SAFE LOOK‑UP
+    if usage:                                         # only when OpenAI returns it
+        _record_usage(usage)
+    else:
+        print("⚠️  No usage info returned for this call")
     return response.content.strip()
 
 def summarize_table(markdown_table: str) -> str:
@@ -275,8 +340,13 @@ You are a business analyst. Summarize the purpose, structure, and key insights o
 Reply in 1-3 sentences.
 """
     response = llm.invoke([HumanMessage(content=prompt)])
+    usage = response.additional_kwargs.get("usage")   # <— SAFE LOOK‑UP
+    if usage:                                         # only when OpenAI returns it
+         _record_usage(usage)
+    else:
+        print("⚠️  No usage info returned for this call")
     return response.content.strip()
 
-
+   
 
 
