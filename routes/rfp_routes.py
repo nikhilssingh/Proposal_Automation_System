@@ -30,10 +30,14 @@ def reset_status_endpoint():
         active_pipelines.clear()
     return {"status": "reset done"}
 
+from backend.agent_status_tracker import mark_pipeline_start
+
+
 @rfp_router.post("/upload_rfp")
 async def upload_rfp(file: UploadFile = File(...)):
     try:
         reset_status()
+        mark_pipeline_start()
         file_path = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_path, "wb") as f:
             f.write(await file.read())

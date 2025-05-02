@@ -1,16 +1,16 @@
-import json
-import time
-from pathlib import Path
-import threading
+# backend/agent_status_tracker.py
+import json, time, threading
 from datetime import datetime
+from pathlib import Path
+from backend.path_utils import LOG_DIR
 
-STATUS_FILE = Path("logs/agent_status.json")
-LOG_FILE = Path("logs/agent_log.txt")
-UPDATE_COOLDOWN = 2  # seconds
-_status_lock = threading.Lock()
-_last_update_time = 0
-STATUS_FILE.parent.mkdir(exist_ok=True, parents=True)
+# ---------- Log / status file paths ----------
+STATUS_FILE  = LOG_DIR / "agent_status.json"
+LOG_FILE     = LOG_DIR / "agent_log.txt"
+PIPELINE_START_FILE = LOG_DIR / "pipeline_start.txt"
+PIPELINE_END_FILE   = LOG_DIR / "pipeline_end.txt"
 
+# ---------- Agent list ----------
 AGENTS = [
     "RFP Analyzer",
     "Context Retriever",
@@ -18,56 +18,78 @@ AGENTS = [
     "Proposal Generator",
     "Strategy Optimizer",
     "Compliance Checker",
-    "Scorer"
+    "Scorer",
 ]
 
-def reset_status():
-    """Reset all agent statuses and clear audit log."""
-    status = {
-        agent: {"state": "⏳ Pending", "timestamp": None}
-        for agent in AGENTS
-    }
+# ---------- Timing helpers ----------
+def mark_pipeline_start() -> None:
+    print(">>> mark_pipeline_start fired – writing file", flush=True)  # DEBUG
+    PIPELINE_START_FILE.write_text(datetime.now().isoformat())
+
+def mark_pipeline_end() -> None:
+    print(">>> mark_pipeline_end fired – writing file", flush=True)    # DEBUG
+    PIPELINE_END_FILE.write_text(datetime.now().isoformat())
+
+def get_pipeline_start() -> str:
+    return PIPELINE_START_FILE.read_text().strip() if PIPELINE_START_FILE.exists() else ""
+
+def get_pipeline_end() -> str:
+    return PIPELINE_END_FILE.read_text().strip() if PIPELINE_END_FILE.exists() else ""
+
+# ---------- Status handling ----------
+UPDATE_COOLDOWN = 1          # minimum seconds between writes
+_status_lock     = threading.Lock()
+_last_update_time = 0
+
+def reset_pipeline_timers() -> None:
+    """Delete start/end timestamp files."""
+    if PIPELINE_START_FILE.exists():
+        PIPELINE_START_FILE.unlink()
+    if PIPELINE_END_FILE.exists():
+        PIPELINE_END_FILE.unlink()
+
+def reset_status() -> None:
+    """Initialise all agents to ⏳ Pending and clear audit log."""
+    status = {agent: {"state": "🕓 Waiting", "timestamp": None} for agent in AGENTS}
+
     with _status_lock:
         STATUS_FILE.write_text(json.dumps(status, indent=2))
-        LOG_FILE.parent.mkdir(exist_ok=True, parents=True)
         LOG_FILE.write_text("")
 
-_status_lock = threading.Lock()
-_last_update_time = 0
-UPDATE_COOLDOWN = 1  # Minimum 1 second between updates
-
-def update_status(agent: str, new_status: str):
-    """Thread-safe status update with rate limiting"""
+def update_status(agent: str, new_status: str, *, force: bool = False) -> None:
+    """
+    Thread-safe status update.
+    Set force=True to bypass the UPDATE_COOLDOWN debounce.
+    """
     global _last_update_time
-    current_time = time.time()
-    
-    if current_time - _last_update_time < UPDATE_COOLDOWN:
+    now = time.time()
+
+    if not force and now - _last_update_time < UPDATE_COOLDOWN:
         return
-        
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     with _status_lock:
         if not STATUS_FILE.exists():
             reset_status()
-            
+
         data = json.loads(STATUS_FILE.read_text())
         if data.get(agent, {}).get("state") != new_status:
             data[agent] = {"state": new_status, "timestamp": timestamp}
             STATUS_FILE.write_text(json.dumps(data, indent=2))
-            
-            with LOG_FILE.open("a", encoding="utf-8") as f:
-                f.write(f"[{timestamp}] {agent}: {new_status}\n")
-            _last_update_time = current_time
+            LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with LOG_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(f"[{timestamp}] {agent}: {new_status}\n")
 
-def get_status():
-    """Return the current status of all agents."""
+        _last_update_time = now
+
+def get_status() -> dict:
     with _status_lock:
         if not STATUS_FILE.exists():
             reset_status()
         return json.loads(STATUS_FILE.read_text())
 
-def get_log():
-    """Return the full execution log as text."""
+def get_log() -> str:
     with _status_lock:
         if not LOG_FILE.exists():
             return "📭 No logs yet. Upload an RFP to begin tracking."

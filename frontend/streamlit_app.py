@@ -2,18 +2,24 @@ import streamlit as st
 import requests
 import time
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 from datetime import datetime, timedelta
+# Allow “backend.” imports when running from /frontend
 import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase import pdfmetrics
+from backend.path_utils import LOG_DIR
+
+def read_ts(name_or_path):
+    p = Path(name_or_path) if isinstance(name_or_path, (str, PurePath)) else name_or_path
+    return datetime.fromisoformat(p.read_text()) if p.exists() else None
 
 # register a Unicode font once at import time
 pdfmetrics.registerFont(TTFont("DejaVu", "fonts/DejaVuSans.ttf"))  # put the TTF here
-# Allow “backend.” imports when running from /frontend
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 
 # ---------------------------- CONFIG ----------------------------
 API_URL        = "http://127.0.0.1:8000"
@@ -179,6 +185,23 @@ if st.session_state.proposal_generated:
     st.header("📄 Generated Proposal")
     st.write(st.session_state.current_proposal)
 
+     # --- show pipeline duration ---
+    def read_ts(path: Path):
+        return datetime.fromisoformat(path.read_text()) if path.exists() else None
+
+    start = read_ts(LOG_DIR / "pipeline_start.txt")
+    end   = read_ts(LOG_DIR / "pipeline_end.txt")
+
+
+    if start and end:
+        mins = (end - start).total_seconds() / 60
+        st.info(f"⏱️ Pipeline duration: **{mins:.1f} minutes**")
+    elif start:
+        st.info("⏱️ Pipeline still running…")
+    else:
+        st.info("⏱️ No run recorded yet.")
+
+    # ---------- Download / Refine blocks follow here ----------
     # ---------- Download as PDF (ReportLab) ----------
     if st.button("⬇️ Download proposal as PDF"):
         pdf_bytes = build_pdf(st.session_state.current_proposal)

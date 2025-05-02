@@ -45,17 +45,29 @@ class ProposalState(TypedDict, total=False):
 
 def extract_pdf_node(state: ProposalState) -> ProposalState:
     from backend.parse_rfp_pdf import parse_rfp_pdf
-    update_status("RFP Analyzer", "📄 Extracting PDF contents")
+    update_status("RFP Analyzer", "📄 Extracting PDF contents", force=True)
+
     parsed = parse_rfp_pdf(state["rfp_path"])
-    initial_state = {
+
+    # 🔹 write the Skipped status *before* any return and with force=True
+    if not parsed["tables"]:
+        update_status(
+            "Table Summarizer",
+            "✅ Skipped (no tables)",
+            force=True           # bypass 1-sec cooldown
+        )
+
+    new_state = {
         **state,
-        "rfp_text": parsed["text_body"] + "\n\n" + parsed["ocr_text"],
+        "rfp_text":   parsed["text_body"] + "\n\n" + parsed["ocr_text"],
         "raw_tables": parsed["tables"],
-        "ocr_text": parsed["ocr_text"],
+        "ocr_text":   parsed["ocr_text"],
         "optimize_attempts": 0,
-        "compliance_retries": 0
+        "compliance_retries": 0,
     }
-    return initial_state
+
+    update_status("RFP Analyzer", "✅ Done", force=True)
+    return new_state
 
 def enrich_rfp_node(state: ProposalState) -> ProposalState:
     update_status("RFP Analyzer", "🧠 In Progress")
@@ -97,19 +109,25 @@ def retrieve_docs_node(state):
     return {**state, "retrieved_docs": docs[:3]}
 
 def table_summary_node(state: ProposalState) -> ProposalState:
-    update_status("Table Summarizer", "🧠 In Progress")
+    update_status("Table Summarizer", "🧠 In Progress", force=True)
+
+    if not state.get("raw_tables"):
+        update_status("Table Summarizer", "✅ Done (no tables)", force=True)
+        return state
+
+    # ----------- normal processing -----------
     summarized_tables = []
-    for table_data in state.get("raw_tables", []):
-        markdown_table = "\n".join([
+    for table_data in state["raw_tables"]:
+        markdown_table = "\n".join(
             " | ".join(str(cell or "") for cell in row) for row in table_data if row
-        ])
+        )
         summary = summarize_table(markdown_table)
         summarized_tables.append(
             f"📊 Table\n{markdown_table}\n\n📝 Summary: {summary}"
         )
 
     state["summarized_tables"] = summarized_tables
-    update_status("Table Summarizer", "✅ Done")
+    update_status("Table Summarizer", "✅ Done", force=True)
     return state
 
 def generate_proposal_node(state: ProposalState) -> ProposalState:
@@ -158,11 +176,17 @@ def score_proposal_node(state: ProposalState) -> ProposalState:
     update_status("Scorer", "🧠 In Progress")
     score_report = score_proposal_quality(state["proposal"])
     update_status("Scorer", "✅ Done")
+    
+    from backend.agent_status_tracker import mark_pipeline_end
+    mark_pipeline_end()
+
     return {
         **state,
         "score_report": score_report,
         "llm_usage_count": llm_usage_count
     }
+
+
 
 # ------------------ Building the LangGraph ------------------
 
