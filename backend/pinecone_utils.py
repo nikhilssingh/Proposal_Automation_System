@@ -2,7 +2,11 @@
 
 import os
 import logging
+import uuid
 from dotenv import load_dotenv
+import openai
+
+from backend.llm_utils import _extract_usage, _record_embedding_usage
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +31,16 @@ if index_name not in existing_indexes:
 
 # 4) Initialize a reference to your index
 index = pc.Index(name=index_name)
+
+def get_embedding(text: str, model: str = "text-embedding-ada-002") -> list[float]:
+    """Call new openai.embeddings.create, record usage, and return the vector."""
+    resp = openai.embeddings.create(input=[text], model=model)
+    usage = _extract_usage(resp)
+    if usage:
+        _record_embedding_usage(usage)
+    else:
+        logging.warning("⚠️ No embedding usage info returned")
+    return resp.data[0].embedding
 
 def retrieve_similar_docs(query: str, top_k: int = 3):
     """
@@ -54,3 +68,12 @@ def retrieve_similar_docs(query: str, top_k: int = 3):
     except Exception as e:
         logging.error(f"❌ Error retrieving documents: {str(e)}")
         return [f"Error retrieving documents: {str(e)}"]
+
+def upsert_proposal(proposal_text: str, proposal_id: str = None) -> None:
+    """
+    After each pipeline run, upsert exactly one new proposal.
+    """
+    pid = proposal_id or f"proposal-{uuid.uuid4()}"
+    vec = get_embedding(proposal_text)
+    index.upsert(vectors=[(pid, vec, {"page_content": proposal_text})])
+    logging.info(f"📤 Upserted proposal {pid} into '{index_name}'")

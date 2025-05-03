@@ -1,25 +1,19 @@
-# backend/agentic_pipeline.py (LangGraph-based)
+# backend/agentic_pipeline.py
 
 from langgraph.graph import StateGraph, END
 from typing import TypedDict
-from backend.llm_utils import llm_usage_count
 
-# Pinecone-based doc retrieval
-from backend.pinecone_utils import retrieve_similar_docs
-
-# LLM utility functions
 from backend.llm_utils import (
+    llm_usage_count,
     expand_rfp,
     optimize_proposal_tone,
     check_compliance,
     score_proposal_quality,
     extract_rfp_metadata,
     summarize_table,
-    summarize_text
 )
-
-# Status tracker
-from backend.agent_status_tracker import update_status
+from backend.pinecone_utils import retrieve_similar_docs, upsert_proposal
+from backend.agent_status_tracker import update_status, mark_pipeline_end
 
 class ProposalState(TypedDict, total=False):
     rfp_path: str
@@ -40,22 +34,16 @@ class ProposalState(TypedDict, total=False):
     compliance_retries: int
     optimize_attempts: int
     llm_usage_count: int
-
-# ------------------ Node definitions ------------------
+    proposal_indexed: bool
 
 def extract_pdf_node(state: ProposalState) -> ProposalState:
     from backend.parse_rfp_pdf import parse_rfp_pdf
     update_status("RFP Analyzer", "📄 Extracting PDF contents", force=True)
-
     parsed = parse_rfp_pdf(state["rfp_path"])
 
-    # 🔹 write the Skipped status *before* any return and with force=True
+    # If no tables, skip table summarizer
     if not parsed["tables"]:
-        update_status(
-            "Table Summarizer",
-            "✅ Skipped (no tables)",
-            force=True           # bypass 1-sec cooldown
-        )
+        update_status("Table Summarizer", "✅ Skipped (no tables)", force=True)
 
     new_state = {
         **state,
@@ -65,7 +53,6 @@ def extract_pdf_node(state: ProposalState) -> ProposalState:
         "optimize_attempts": 0,
         "compliance_retries": 0,
     }
-
     update_status("RFP Analyzer", "✅ Done", force=True)
     return new_state
 
@@ -76,57 +63,36 @@ def enrich_rfp_node(state: ProposalState) -> ProposalState:
     update_status("RFP Analyzer", "✅ Done")
     return {
         **state,
-        "rfp_text": rfp_text,
-        "metadata": metadata,
-        "industry": metadata.get("industry", "generic"),
-        "region": metadata.get("region", "global"),
+        "rfp_text":    rfp_text,
+        "metadata":    metadata,
+        "industry":    metadata.get("industry", "generic"),
+        "region":      metadata.get("region", "global"),
         "constraints": metadata.get("constraints", []),
-        "client_needs": metadata.get("client_needs", [])
+        "client_needs":metadata.get("client_needs", []),
     }
 
-def retrieve_docs_node(state):
-    if "retrieved_docs" in state and state["retrieved_docs"]:
-        print("⚠️ Retrieval already done. Skipping redundant embedding/retrieval.")
-        return state
-
+def retrieve_docs_node(state: ProposalState) -> ProposalState:
     update_status("Context Retriever", "🧠 In Progress")
-    rfp_text = state["rfp_text"]
-    if len(rfp_text) > 3000:
-        context = f"{rfp_text[:3000]}\n\n...\n\n{rfp_text[-1000:]}"
-        try:
-            docs = retrieve_similar_docs(context, top_k=3)
-        except Exception as e:
-            print(f"⚠️ Retrieval failed: {e}")
-            docs = []
-    else:
-        try:
-            docs = retrieve_similar_docs(rfp_text, top_k=3)
-        except Exception as e:
-            print(f"⚠️ Retrieval failed: {e}")
-            docs = []
-
+    docs = retrieve_similar_docs(state["rfp_text"], top_k=3)
     update_status("Context Retriever", "✅ Done")
-    return {**state, "retrieved_docs": docs[:3]}
+    return {**state, "retrieved_docs": docs}
 
 def table_summary_node(state: ProposalState) -> ProposalState:
     update_status("Table Summarizer", "🧠 In Progress", force=True)
-
     if not state.get("raw_tables"):
         update_status("Table Summarizer", "✅ Done (no tables)", force=True)
         return state
 
-    # ----------- normal processing -----------
-    summarized_tables = []
+    summarized = []
     for table_data in state["raw_tables"]:
-        markdown_table = "\n".join(
-            " | ".join(str(cell or "") for cell in row) for row in table_data if row
+        markdown = "\n".join(
+            " | ".join(str(cell or "") for cell in row)
+            for row in table_data if row
         )
-        summary = summarize_table(markdown_table)
-        summarized_tables.append(
-            f"📊 Table\n{markdown_table}\n\n📝 Summary: {summary}"
-        )
+        summary = summarize_table(markdown)
+        summarized.append(f"📊 Table\n{markdown}\n\n📝 Summary: {summary}")
 
-    state["summarized_tables"] = summarized_tables
+    state["summarized_tables"] = summarized
     update_status("Table Summarizer", "✅ Done", force=True)
     return state
 
@@ -150,7 +116,7 @@ def optimize_proposal_node(state: ProposalState) -> ProposalState:
     update_status("Strategy Optimizer", "✅ Done")
     return {
         **state,
-        "proposal": optimized,
+        "proposal":        optimized,
         "optimize_attempts": state.get("optimize_attempts", 0) + 1
     }
 
@@ -163,35 +129,33 @@ def check_compliance_node(state: ProposalState) -> ProposalState:
     return state
 
 def compliance_condition(state: ProposalState) -> str:
-    max_attempts = 2
     if state.get("compliance_passed"):
         return "Score Proposal"
-    elif state.get("optimize_attempts", 0) >= max_attempts:
-        print("⚠️ Max optimization attempts reached. Proceeding anyway.")
+    if state.get("optimize_attempts", 0) >= 2:
         return "Score Proposal"
-    else:
-        return "Optimize Tone"
+    return "Optimize Tone"
 
 def score_proposal_node(state: ProposalState) -> ProposalState:
     update_status("Scorer", "🧠 In Progress")
-    score_report = score_proposal_quality(state["proposal"])
-    update_status("Scorer", "✅ Done")
-    
-    from backend.agent_status_tracker import mark_pipeline_end
+    score = score_proposal_quality(state["proposal"])
+
+    # ← only upsert once per run
+    if not state.get("proposal_indexed", False):
+        from backend.pinecone_utils import upsert_proposal
+        upsert_proposal(state["proposal"])
+        state["proposal_indexed"] = True
+
     mark_pipeline_end()
+    update_status("Scorer", "✅ Done")
 
     return {
         **state,
-        "score_report": score_report,
+        "score_report": score,
         "llm_usage_count": llm_usage_count
     }
 
-
-
-# ------------------ Building the LangGraph ------------------
-
+# Build & compile the LangGraph
 builder = StateGraph(state_schema=ProposalState)
-
 builder.add_node("Extract PDF", extract_pdf_node)
 builder.add_node("Enrich RFP", enrich_rfp_node)
 builder.add_node("Retrieve Docs", retrieve_docs_node)
@@ -208,14 +172,10 @@ builder.add_edge("Retrieve Docs", "Summarize Tables")
 builder.add_edge("Summarize Tables", "Generate Proposal")
 builder.add_edge("Generate Proposal", "Optimize Tone")
 builder.add_edge("Optimize Tone", "Check Compliance")
-
 builder.add_conditional_edges(
     "Check Compliance",
     compliance_condition,
-    {
-        "Score Proposal": "Score Proposal",
-        "Optimize Tone": "Optimize Tone"
-    }
+    {"Score Proposal": "Score Proposal", "Optimize Tone": "Optimize Tone"}
 )
 builder.add_edge("Score Proposal", END)
 
