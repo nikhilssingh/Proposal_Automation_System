@@ -5,12 +5,14 @@ from routes import api_router  # ✅ Central route import
 from backend.agentic_pipeline import proposal_agentic_graph  # ✅ Import graph here
 from backend.llm_utils import llm_usage_count
 import logging
+from routes.retrieval_routes import retrieval_router
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Initialize FastAPI app
 app = FastAPI(title="RFP Automation API", version="1.0")
+app.include_router(retrieval_router)
 
 # Register routes
 app.include_router(api_router)

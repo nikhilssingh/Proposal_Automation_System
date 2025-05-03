@@ -8,3 +8,4 @@
 [2025-05-03 02:22:35] Strategy Optimizer: ✅ Done
 [2025-05-03 02:22:52] Compliance Checker: ✅ Done
 [2025-05-03 02:22:58] Scorer: ✅ Done
+[2025-05-03 03:08:57] RFP Analyzer: 📄 Extracting PDF contents

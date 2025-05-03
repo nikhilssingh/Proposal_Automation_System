@@ -8,7 +8,9 @@ from backend.llm_utils import (
     expand_rfp,
     refine_proposal,
     conversation_memory,
-    remove_unsupported_unicode
+    remove_unsupported_unicode,
+    check_compliance,
+    score_proposal_quality,
 )
 from backend.pinecone_utils import retrieve_similar_docs
 from backend.agent_status_tracker import get_status, get_log, update_status
