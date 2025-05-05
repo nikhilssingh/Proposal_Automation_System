@@ -1,6 +1,6 @@
 Metric,Manual,AI pipeline,Δ,% saving
-Time to draft (min),145,1.4,-143.6,99 %
-Labour cost ($),108.75,1.08,107.67,99 %
-OpenAI usage ($),0,0.01,0.01,—
+Time to draft (min),145,6.1,-138.9,96 %
+Labour cost ($),108.75,4.61,104.14,96 %
+OpenAI usage ($),0,0.06,0.06,—
 Pinecone usage ($),0,0.10,0.10,—
-Total cost ($),108.75,1.18,-107.57,99 %
+Total cost ($),108.75,4.77,-103.98,96 %

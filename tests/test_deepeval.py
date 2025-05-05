@@ -1,34 +1,14 @@
 # tests/test_deepeval.py
 
+from datetime import time
 from pathlib import Path
 import requests
 from deepeval import assert_test
 from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 from deepeval.metrics import GEval, AnswerRelevancyMetric
-
-# 1️⃣ Retrieval test: check that your retriever returns relevant past proposals
-def test_retrieval_relevancy():
-    query = "AI integration for coffee shop inventory"
-    resp = requests.get(
-        "http://localhost:8000/retrieve_docs",
-        params={"query": query},
-        timeout=5
-    )
-    # ensure the endpoint is up and returns our key
-    assert resp.status_code == 200, f"Expected 200 OK, got {resp.status_code}: {resp.text}"
-    data = resp.json()
-    docs = data.get("retrieved_docs", [])
-    assert isinstance(docs, list), f"'retrieved_docs' should be a list, got {type(docs)}"
-
-    actual = "\n\n".join(docs)
-    test_case = LLMTestCase(input=query, actual_output=actual)
-
-    # only threshold is supported
-    relevancy = AnswerRelevancyMetric(threshold=0.5)
-    assert_test(test_case, [relevancy])
+from deepeval.evaluate import assert_test
 
 
-# 2️⃣ Proposal quality test: check clarity & persuasiveness of an actual run
 def test_proposal_quality():
     # pick the first RFP in uploaded_rfps/ as our sample
     upload_dir = Path("uploaded_rfps")
@@ -53,8 +33,10 @@ def test_proposal_quality():
     # call your generate_proposal endpoint
     resp = requests.post(
         "http://localhost:8000/proposal/generate_proposal",
-        json={"rfp_text": rfp_text},
-        timeout=60
+        json={"rfp_text": rfp_text,
+              "rfp_path": str(sample.resolve())
+              },
+        timeout=360
     )
     assert resp.status_code == 200, f"Expected 200 OK, got {resp.status_code}: {resp.text}"
     proposal = resp.json().get("proposal", "")

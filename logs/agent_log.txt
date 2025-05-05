@@ -1,11 +1,21 @@
-[2025-05-03 02:21:33] RFP Analyzer: 📄 Extracting PDF contents
-[2025-05-03 02:21:41] Table Summarizer: ✅ Skipped (no tables)
-[2025-05-03 02:21:41] RFP Analyzer: ✅ Done
-[2025-05-03 02:21:50] Context Retriever: ✅ Done
-[2025-05-03 02:21:50] Table Summarizer: 🧠 In Progress
-[2025-05-03 02:21:50] Table Summarizer: ✅ Done (no tables)
-[2025-05-03 02:22:12] Proposal Generator: ✅ Done
-[2025-05-03 02:22:35] Strategy Optimizer: ✅ Done
-[2025-05-03 02:22:52] Compliance Checker: ✅ Done
-[2025-05-03 02:22:58] Scorer: ✅ Done
-[2025-05-03 03:08:57] RFP Analyzer: 📄 Extracting PDF contents
+[2025-05-05 00:35:33] RFP Analyzer: 📄 Extracting PDF contents
+[2025-05-05 00:38:13] RFP Analyzer: ✅ Done
+[2025-05-05 00:38:19] Context Retriever: ✅ Done
+[2025-05-05 00:38:19] Table Summarizer: 🧠 In Progress
+[2025-05-05 00:39:11] Table Summarizer: ✅ Done
+[2025-05-05 00:40:56] Proposal Generator: ✅ Done
+[2025-05-05 00:41:19] Strategy Optimizer: ✅ Done
+[2025-05-05 00:41:35] Compliance Checker: ✅ Done
+[2025-05-05 00:41:41] Scorer: ✅ Done
+[2025-05-05 00:48:25] RFP Analyzer: 📄 Extracting PDF contents
+[2025-05-05 00:51:00] RFP Analyzer: ✅ Done
+[2025-05-05 00:51:07] Table Summarizer: 🧠 In Progress
+[2025-05-05 00:52:04] Table Summarizer: ✅ Done
+[2025-05-05 00:55:12] RFP Analyzer: 📄 Extracting PDF contents
+[2025-05-05 00:57:43] RFP Analyzer: ✅ Done
+[2025-05-05 00:57:49] Table Summarizer: 🧠 In Progress
+[2025-05-05 00:58:47] Table Summarizer: ✅ Done
+[2025-05-05 01:01:15] Refiner: 🧠 In Progress
+[2025-05-05 01:01:46] Refiner: ✅ Done
+[2025-05-05 01:04:54] Refiner: 🧠 In Progress
+[2025-05-05 01:05:20] Refiner: ✅ Done

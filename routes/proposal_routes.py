@@ -1,6 +1,7 @@
 # routes/proposal_routes.py
 
 import logging
+from typing import Optional
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -22,6 +23,7 @@ proposal_router = APIRouter()
 class RFPRequest(BaseModel):
     rfp_text: str
     retrieved_docs: list = []
+    rfp_path: Optional[str] = None
 
 @proposal_router.post("/generate_proposal")
 def generate_proposal(request: RFPRequest):
@@ -30,13 +32,21 @@ def generate_proposal(request: RFPRequest):
     a pipeline (LangGraph).
     """
     from backend.agentic_pipeline import proposal_agentic_graph
+
     try:
         rfp_text = request.rfp_text.strip()
         if not rfp_text:
             raise HTTPException(status_code=400, detail="RFP text cannot be empty.")
 
+        # ✅ Collect inputs for pipeline
+        pipeline_input = {
+            "rfp_text": rfp_text,
+        }
+        if request.rfp_path:
+            pipeline_input["rfp_path"] = request.rfp_path
+
         # Kick off pipeline
-        result = proposal_agentic_graph.invoke({"rfp_text": rfp_text})
+        result = proposal_agentic_graph.invoke(pipeline_input)
 
         proposal = remove_unsupported_unicode(result["proposal"])
         retrieved_docs = result["retrieved_docs"]
@@ -52,8 +62,10 @@ def generate_proposal(request: RFPRequest):
             "compliance_report": compliance,
             "score_report": score
         }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating proposal: {str(e)}")
+
 
 class RefineRequest(BaseModel):
     current_proposal: str = None
